@@ -1,0 +1,19 @@
+{
+  "name": "vehicle-nav-gps-bridge",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Reads NMEA from a u-blox M10 USB GPS receiver over serial and broadcasts position over WebSocket.",
+  "main": "bridge.js",
+  "scripts": {
+    "start": "node bridge.js"
+  },
+  "engines": {
+    "node": ">=18"
+  },
+  "dependencies": {
+    "@serialport/parser-readline": "^12.0.0",
+    "nmea-simple": "^3.3.0",
+    "serialport": "^12.0.0",
+    "ws": "^8.18.0"
+  }
+}
