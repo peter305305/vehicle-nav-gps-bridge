@@ -45,7 +45,11 @@ export class VehicleMap {
     this.map = new maplibregl.Map({
       container: containerId,
       style: styleUrl,
-      center: [-80.13, 25.7907],
+      // Default center is Midtown Manhattan (Times Square-ish) — the map only
+      // sits here for the few seconds between page load and first GPS fix, so
+      // it should be somewhere visually recognizable on a dark style. Once a
+      // fix arrives, setVehicle() jumps to the real position.
+      center: [-73.9857, 40.7549],
       zoom: 13,
       pitchWithRotate: false,
       dragRotate: false,
