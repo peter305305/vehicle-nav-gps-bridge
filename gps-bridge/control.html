@@ -140,6 +140,58 @@
       margin-bottom: 10px;
     }
     .form-row .full { grid-column: 1 / -1; }
+    .hint {
+      font-size: 13px;
+      color: var(--muted);
+      margin: -4px 0 10px 2px;
+      line-height: 1.4;
+    }
+    .hint code {
+      background: var(--panel-2);
+      padding: 1px 5px;
+      border-radius: 4px;
+      font-size: 12px;
+    }
+    .results {
+      display: flex;
+      flex-direction: column;
+      gap: 8px;
+      margin-top: 12px;
+    }
+    .result {
+      text-align: left;
+      background: var(--panel-2);
+      border: 1px solid transparent;
+      border-radius: 10px;
+      padding: 12px 14px;
+      cursor: pointer;
+      transition: background 0.15s, border-color 0.15s;
+    }
+    .result:hover, .result:active {
+      background: var(--accent-dim);
+      border-color: var(--accent);
+    }
+    .result .place-name {
+      font-weight: 500;
+      color: var(--text);
+      font-size: 15px;
+    }
+    .result .place-meta {
+      font-size: 12px;
+      color: var(--muted);
+      margin-top: 2px;
+    }
+    details > summary {
+      cursor: pointer;
+      font-size: 13px;
+      color: var(--muted);
+      margin-top: 14px;
+      list-style: none;
+      padding: 6px 0;
+    }
+    details > summary::-webkit-details-marker { display: none; }
+    details > summary::before { content: '▸ '; color: var(--accent); }
+    details[open] > summary::before { content: '▾ '; }
     .ack {
       position: fixed;
       bottom: max(env(safe-area-inset-bottom), 20px);
@@ -192,23 +244,42 @@
 
   <section>
     <h2>Destination</h2>
+    <div id="dest-current" class="hint" hidden></div>
     <div class="form-row">
-      <div>
-        <label for="dest-lat">Latitude</label>
-        <input id="dest-lat" type="number" step="any" inputmode="decimal" placeholder="25.7907" />
-      </div>
-      <div>
-        <label for="dest-lon">Longitude</label>
-        <input id="dest-lon" type="number" step="any" inputmode="decimal" placeholder="-80.1300" />
-      </div>
       <div class="full">
-        <label for="dest-label">Label</label>
-        <input id="dest-label" type="text" placeholder="Destination" />
+        <label for="dest-address">Address or place</label>
+        <input id="dest-address" type="search" inputmode="search" autocomplete="off"
+               placeholder="1234 Ocean Drive, Miami Beach" />
       </div>
     </div>
     <div class="row">
-      <button id="dest-set" class="primary">Set destination</button>
+      <button id="dest-find" class="primary">Find</button>
       <button id="dest-clear" class="ghost">Clear</button>
+    </div>
+    <div id="dest-results" class="results"></div>
+    <details id="dest-manual">
+      <summary>Set by lat/lon instead</summary>
+      <div class="form-row" style="margin-top: 10px;">
+        <div>
+          <label for="dest-lat">Latitude</label>
+          <input id="dest-lat" type="number" step="any" inputmode="decimal" placeholder="25.7907" />
+        </div>
+        <div>
+          <label for="dest-lon">Longitude</label>
+          <input id="dest-lon" type="number" step="any" inputmode="decimal" placeholder="-80.1300" />
+        </div>
+        <div class="full">
+          <label for="dest-label">Label</label>
+          <input id="dest-label" type="text" placeholder="Destination" />
+        </div>
+      </div>
+      <div class="row">
+        <button id="dest-set-manual" class="primary">Set destination</button>
+      </div>
+    </details>
+    <div id="dest-no-token" class="hint" hidden>
+      Address search needs a Mapbox token. Set <code>MAPBOX_TOKEN</code> in
+      <code>/etc/default/vehicle-nav-bridge</code> on the Pi to enable it.
     </div>
   </section>
 
@@ -237,11 +308,37 @@
       const intOn = document.getElementById('int-on');
       const recenterBtn = document.getElementById('recenter');
       const zoomBtns = Array.from(document.querySelectorAll('[data-zoom]'));
+      const destAddress = document.getElementById('dest-address');
+      const destFind = document.getElementById('dest-find');
+      const destResults = document.getElementById('dest-results');
+      const destCurrent = document.getElementById('dest-current');
+      const destNoToken = document.getElementById('dest-no-token');
+      const destManual = document.getElementById('dest-manual');
       const destLat = document.getElementById('dest-lat');
       const destLon = document.getElementById('dest-lon');
       const destLabel = document.getElementById('dest-label');
-      const destSet = document.getElementById('dest-set');
+      const destSetManual = document.getElementById('dest-set-manual');
       const destClear = document.getElementById('dest-clear');
+
+      // ---- Geocoder config (Mapbox token from /control/config) ----
+      let mapboxToken = null;
+      fetch('/control/config').then((r) => r.ok ? r.json() : null).then((cfg) => {
+        if (cfg && cfg.mapboxToken) {
+          mapboxToken = cfg.mapboxToken;
+        } else {
+          // No token — disable the address search affordances, force open the
+          // manual lat/lon disclosure so the user can still set a destination.
+          destAddress.disabled = true;
+          destFind.disabled = true;
+          destNoToken.hidden = false;
+          destManual.open = true;
+        }
+      }).catch(() => {
+        destAddress.disabled = true;
+        destFind.disabled = true;
+        destNoToken.hidden = false;
+        destManual.open = true;
+      });
 
       // ---- WebSocket with reconnect ----
       let ws = null;
@@ -317,11 +414,17 @@
           zoomBtns.forEach((b) => b.classList.toggle('active', Number(b.dataset.zoom) === s.zoom));
         }
         if (s.destination && typeof s.destination === 'object') {
+          const label = s.destination.label || `${s.destination.lat?.toFixed?.(5)}, ${s.destination.lon?.toFixed?.(5)}`;
+          destCurrent.textContent = '📍 ' + label;
+          destCurrent.hidden = false;
+          // Sync the manual lat/lon fields too so opening the disclosure shows
+          // current values; never clobber a field the user is actively typing.
           if (document.activeElement !== destLat) destLat.value = s.destination.lat ?? '';
           if (document.activeElement !== destLon) destLon.value = s.destination.lon ?? '';
           if (document.activeElement !== destLabel) destLabel.value = s.destination.label ?? '';
         } else if (s.destination === null) {
-          // Don't clobber what the user is mid-typing; leave inputs alone.
+          destCurrent.textContent = '';
+          destCurrent.hidden = true;
         }
       }
 
@@ -345,7 +448,73 @@
         });
       });
 
-      destSet.addEventListener('click', () => {
+      // ---- Address geocoder via Mapbox Geocoding API ----
+      let geocodeAbort = null;
+      async function runGeocode() {
+        const q = destAddress.value.trim();
+        if (!q) { destResults.innerHTML = ''; return; }
+        if (!mapboxToken) { ack('no Mapbox token'); return; }
+        // Cancel any in-flight request — the user typed something new.
+        if (geocodeAbort) geocodeAbort.abort();
+        geocodeAbort = new AbortController();
+        destFind.disabled = true; destFind.textContent = 'Searching…';
+        try {
+          const url = 'https://api.mapbox.com/geocoding/v5/mapbox.places/' +
+            encodeURIComponent(q) + '.json?limit=5&access_token=' + encodeURIComponent(mapboxToken);
+          const res = await fetch(url, { signal: geocodeAbort.signal });
+          if (!res.ok) throw new Error('geocode ' + res.status);
+          const data = await res.json();
+          renderResults(data.features || []);
+        } catch (err) {
+          if (err.name !== 'AbortError') {
+            console.error(err);
+            destResults.innerHTML = '';
+            ack('geocode failed');
+          }
+        } finally {
+          destFind.disabled = false; destFind.textContent = 'Find';
+          geocodeAbort = null;
+        }
+      }
+
+      function renderResults(features) {
+        destResults.innerHTML = '';
+        if (!features.length) {
+          ack('no matches');
+          return;
+        }
+        for (const f of features) {
+          if (!f || !Array.isArray(f.center) || f.center.length !== 2) continue;
+          const [lon, lat] = f.center;
+          if (typeof lat !== 'number' || typeof lon !== 'number') continue;
+          const btn = document.createElement('button');
+          btn.className = 'result';
+          // Mapbox places API gives us a "text" (the primary name) and
+          // "place_name" (full formatted address). Surface both so the user
+          // can disambiguate "Miami" the city from "Miami" the bar.
+          const name = f.text || f.place_name || 'Unknown';
+          const meta = f.place_name && f.place_name !== name ? f.place_name : '';
+          btn.innerHTML =
+            '<div class="place-name"></div>' +
+            (meta ? '<div class="place-meta"></div>' : '');
+          btn.querySelector('.place-name').textContent = name;
+          if (meta) btn.querySelector('.place-meta').textContent = meta;
+          btn.addEventListener('click', () => {
+            if (send({ type: 'set', key: 'destination', value: { lat, lon, label: f.place_name || name } })) {
+              destResults.innerHTML = '';
+              ack('destination set');
+            }
+          });
+          destResults.appendChild(btn);
+        }
+      }
+
+      destFind.addEventListener('click', runGeocode);
+      destAddress.addEventListener('keydown', (e) => {
+        if (e.key === 'Enter') { e.preventDefault(); runGeocode(); }
+      });
+
+      destSetManual.addEventListener('click', () => {
         const lat = Number(destLat.value);
         const lon = Number(destLon.value);
         if (!Number.isFinite(lat) || !Number.isFinite(lon)) {
@@ -362,6 +531,8 @@
 
       destClear.addEventListener('click', () => {
         if (send({ type: 'set', key: 'destination', value: null })) {
+          destAddress.value = '';
+          destResults.innerHTML = '';
           destLat.value = '';
           destLon.value = '';
           destLabel.value = '';
