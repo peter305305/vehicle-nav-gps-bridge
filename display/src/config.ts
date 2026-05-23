@@ -37,14 +37,20 @@ const env = import.meta.env;
 
 const mapboxToken = parseOptional(env.VITE_MAPBOX_TOKEN as string | undefined);
 
-// Default map style. We prefer a real dark cartography out of the box because
+// Default map style. We want a real dark cartography out of the box because
 // the kiosk runs in dim cabin lighting and the demo MapLibre style is bright
-// and stylized — wrong for the room. If the user has a Mapbox token (already
-// required for the Directions API), use Mapbox's dark-v11; otherwise fall back
-// to OpenFreeMap's dark-matter, which is free, hosted, and key-free.
-const defaultStyleUrl = mapboxToken
-  ? `https://api.mapbox.com/styles/v1/mapbox/dark-v11?access_token=${encodeURIComponent(mapboxToken)}`
-  : 'https://tiles.openfreemap.org/styles/dark-matter';
+// and stylized — wrong for the room.
+//
+// OpenFreeMap's dark-matter is MapLibre-native vector tiles, free, hosted, and
+// key-free. We deliberately DON'T auto-upgrade to Mapbox's dark-v11 even when
+// VITE_MAPBOX_TOKEN is set, because Mapbox's current style schema includes
+// proprietary properties (3D models, lights, etc.) that MapLibre's strict
+// validator rejects ("unknown property" errors → blank map). The token still
+// powers the Directions API and the address geocoder; for the basemap, point
+// VITE_MAP_STYLE_URL at a known MapLibre-compatible style (MapTiler, Stadia,
+// or a Mapbox Studio style exported as MapLibre-compatible) if you want a
+// different look.
+const defaultStyleUrl = 'https://tiles.openfreemap.org/styles/dark';
 
 export const config = {
   gpsWsUrl: parseString(env.VITE_GPS_WS_URL as string | undefined, sameOriginWs('/gps')),
