@@ -10,6 +10,7 @@ interface VehiclePos {
 }
 
 const CONNECTOR_SOURCE = 'vehicle-connector';
+const CONNECTOR_LAYER_GLOW = 'vehicle-connector-glow';
 const CONNECTOR_LAYER = 'vehicle-connector-line';
 
 // We only recenter when the marker drifts outside this central box (expressed as a
@@ -17,6 +18,11 @@ const CONNECTOR_LAYER = 'vehicle-connector-line';
 // map to pan constantly, which feels nauseating; clamping recentre to this dead zone
 // keeps the experience calm without ever letting the vehicle disappear off-screen.
 const RECENTRE_DEAD_ZONE = 0.3;
+
+// Names of every MapLibre gesture handler we toggle together. dragRotate and
+// touchPitch are intentionally omitted — rotation/tilt stay disabled forever so
+// the map can never end up off-axis, regardless of interactive mode.
+const TOGGLE_HANDLERS = ['dragPan', 'scrollZoom', 'touchZoomRotate', 'doubleClickZoom', 'keyboard', 'boxZoom'] as const;
 
 export class VehicleMap {
   private map: MlMap;
@@ -26,11 +32,16 @@ export class VehicleMap {
   private currentVehicle: VehiclePos | null = null;
   private styleLoaded = false;
   private connectorPending = false;
+  private interactive: boolean;
+  private userInteracting = false;
+  private userInteractionTimer: number | null = null;
 
-  constructor(containerId: string, styleUrl: string) {
-    // The display is passive — pitchWithRotate/dragRotate/touchZoomRotate are off so
-    // the map can never end up rotated or tilted. `interactive: false` disables every
-    // gesture handler in one go (no scroll-zoom, no drag-pan).
+  constructor(containerId: string, styleUrl: string, opts: { interactive?: boolean } = {}) {
+    this.interactive = !!opts.interactive;
+    // We always construct the map with `interactive: true` so MapLibre attaches
+    // every gesture handler up-front; then we individually disable each handler
+    // for kiosk mode. This lets setInteractive() flip the state at runtime
+    // without reconstructing the map (which would lose camera state).
     this.map = new maplibregl.Map({
       container: containerId,
       style: styleUrl,
@@ -38,14 +49,92 @@ export class VehicleMap {
       zoom: 13,
       pitchWithRotate: false,
       dragRotate: false,
-      touchZoomRotate: false,
-      interactive: false,
       attributionControl: { compact: true },
     });
+
+    // Rotation is permanently disabled — touchZoomRotate stays usable for
+    // pinch-zoom but its rotation half is stripped off.
+    this.map.dragRotate.disable();
+    this.map.touchZoomRotate.disableRotation();
+    this.applyInteractive();
+
+    // User-initiated camera events carry an `originalEvent`; programmatic
+    // easeTo/jumpTo doesn't. Filter on that so our own centerOnVehicle calls
+    // don't trip the "user is exploring" flag.
+    const onUserCamera = (e: { originalEvent?: unknown }) => {
+      if (e.originalEvent) this.markUserInteraction();
+    };
+    this.map.on('dragstart', onUserCamera);
+    this.map.on('zoomstart', onUserCamera);
+    this.map.on('wheel', () => this.markUserInteraction());
 
     this.map.on('load', () => {
       this.styleLoaded = true;
       if (this.connectorPending) this.refreshConnector();
+    });
+  }
+
+  private applyInteractive(): void {
+    for (const name of TOGGLE_HANDLERS) {
+      const handler = (this.map as unknown as Record<string, { enable: () => void; disable: () => void }>)[name];
+      if (!handler) continue;
+      if (this.interactive) handler.enable();
+      else handler.disable();
+    }
+    // Rotation must stay off even after touchZoomRotate.enable() puts it back.
+    this.map.touchZoomRotate.disableRotation();
+  }
+
+  private markUserInteraction(): void {
+    if (!this.interactive) return;
+    this.userInteracting = true;
+    if (this.userInteractionTimer !== null) clearTimeout(this.userInteractionTimer);
+    // After 30s of no panning/zooming, resume auto-recentering on the vehicle. Long
+    // enough that an exploratory look-around isn't interrupted, short enough that
+    // forgetting about the page doesn't leave the vehicle off-screen forever.
+    this.userInteractionTimer = window.setTimeout(() => {
+      this.userInteracting = false;
+      this.userInteractionTimer = null;
+    }, 30000);
+  }
+
+  setInteractive(interactive: boolean): void {
+    if (this.interactive === interactive) return;
+    this.interactive = interactive;
+    this.applyInteractive();
+    if (!interactive) {
+      // Leaving interactive mode — clear the "exploring" timer so auto-recenter
+      // resumes immediately rather than waiting out the 30s grace period.
+      if (this.userInteractionTimer !== null) {
+        clearTimeout(this.userInteractionTimer);
+        this.userInteractionTimer = null;
+      }
+      this.userInteracting = false;
+      if (this.currentVehicle) this.forceRecenter();
+    }
+  }
+
+  isInteractive(): boolean {
+    return this.interactive;
+  }
+
+  setZoom(zoom: number, opts?: { duration?: number }): void {
+    if (!Number.isFinite(zoom)) return;
+    this.map.easeTo({ zoom, duration: opts?.duration ?? 400 });
+  }
+
+  forceRecenter(opts?: { duration?: number }): void {
+    if (!this.currentVehicle) return;
+    // Skip the userInteracting check — this is an explicit user-requested
+    // recenter from the phone, which should win over any pan they did locally.
+    if (this.userInteractionTimer !== null) {
+      clearTimeout(this.userInteractionTimer);
+      this.userInteractionTimer = null;
+    }
+    this.userInteracting = false;
+    this.map.easeTo({
+      center: [this.currentVehicle.lon, this.currentVehicle.lat],
+      duration: opts?.duration ?? 500,
     });
   }
 
@@ -87,13 +176,12 @@ export class VehicleMap {
 
     const lngLat: LngLatLike = [dest.lon, dest.lat];
     if (!this.destinationMarker) {
+      // Two stacked elements inside one marker: an outer pulsing halo + a
+      // crisp inner dot. The halo is keyframe-animated in style.css; we just
+      // hand MapLibre the markup and let CSS do the rest.
       const el = document.createElement('div');
-      el.style.width = '18px';
-      el.style.height = '18px';
-      el.style.borderRadius = '50%';
-      el.style.background = '#22D3EE';
-      el.style.boxShadow = '0 0 0 4px rgba(34, 211, 238, 0.25), 0 2px 8px rgba(0,0,0,0.5)';
-      el.style.border = '2px solid #0B1620';
+      el.className = 'dest-marker';
+      el.innerHTML = '<div class="dest-pulse"></div><div class="dest-dot"></div>';
       el.style.pointerEvents = 'none';
       this.destinationMarker = new maplibregl.Marker({ element: el })
         .setLngLat(lngLat)
@@ -108,6 +196,7 @@ export class VehicleMap {
   }
 
   centerOnVehicle(pos: VehiclePos, opts?: { duration?: number }): void {
+    if (this.userInteracting) return;
     const point = this.map.project([pos.lon, pos.lat]);
     const canvas = this.map.getCanvas();
     const w = canvas.clientWidth;
@@ -132,6 +221,7 @@ export class VehicleMap {
 
     if (!haveLine) {
       if (this.map.getLayer(CONNECTOR_LAYER)) this.map.removeLayer(CONNECTOR_LAYER);
+      if (this.map.getLayer(CONNECTOR_LAYER_GLOW)) this.map.removeLayer(CONNECTOR_LAYER_GLOW);
       if (existingSource) this.map.removeSource(CONNECTOR_SOURCE);
       return;
     }
@@ -156,6 +246,22 @@ export class VehicleMap {
     }
 
     this.map.addSource(CONNECTOR_SOURCE, { type: 'geojson', data });
+    // Two layers stacked: a wide, blurred-feel glow underneath (line-blur +
+    // higher width) and a crisp dashed line on top. The combination reads as
+    // "this line glows" without needing a real bloom filter, which MapLibre
+    // can't do on lines directly.
+    this.map.addLayer({
+      id: CONNECTOR_LAYER_GLOW,
+      type: 'line',
+      source: CONNECTOR_SOURCE,
+      layout: { 'line-cap': 'round', 'line-join': 'round' },
+      paint: {
+        'line-color': '#22D3EE',
+        'line-width': 10,
+        'line-opacity': 0.22,
+        'line-blur': 6,
+      },
+    });
     this.map.addLayer({
       id: CONNECTOR_LAYER,
       type: 'line',
@@ -163,9 +269,9 @@ export class VehicleMap {
       layout: { 'line-cap': 'round', 'line-join': 'round' },
       paint: {
         'line-color': '#67E8F9',
-        'line-width': 2,
-        'line-opacity': 0.6,
-        'line-dasharray': [2, 2],
+        'line-width': 2.5,
+        'line-opacity': 0.9,
+        'line-dasharray': [2, 2.5],
       },
     });
   }

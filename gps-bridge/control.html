@@ -1,0 +1,376 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
+  <meta name="theme-color" content="#0B1620" />
+  <title>Vehicle nav · control</title>
+  <style>
+    :root {
+      --bg: #0B1620;
+      --panel: #122231;
+      --panel-2: #1A3146;
+      --text: #E6F1FA;
+      --muted: #8AA4BD;
+      --accent: #22D3EE;
+      --accent-dim: rgba(34, 211, 238, 0.18);
+      --danger: #F87171;
+      --ok: #34D399;
+      --radius: 14px;
+      --gap: 14px;
+    }
+    * { box-sizing: border-box; }
+    html, body {
+      margin: 0;
+      background: var(--bg);
+      color: var(--text);
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+      font-size: 17px;
+      -webkit-font-smoothing: antialiased;
+    }
+    body {
+      min-height: 100dvh;
+      padding: max(env(safe-area-inset-top), 16px) 16px max(env(safe-area-inset-bottom), 16px);
+    }
+    h1 {
+      font-size: 18px;
+      font-weight: 600;
+      margin: 0 0 4px 0;
+      letter-spacing: 0.02em;
+    }
+    .status {
+      font-size: 13px;
+      color: var(--muted);
+      margin-bottom: 18px;
+      display: flex;
+      align-items: center;
+      gap: 8px;
+    }
+    .dot {
+      width: 8px;
+      height: 8px;
+      border-radius: 50%;
+      background: var(--danger);
+      transition: background 0.2s;
+    }
+    .dot.open { background: var(--ok); }
+    section {
+      background: var(--panel);
+      border-radius: var(--radius);
+      padding: 16px;
+      margin-bottom: var(--gap);
+    }
+    section h2 {
+      font-size: 13px;
+      text-transform: uppercase;
+      letter-spacing: 0.1em;
+      color: var(--muted);
+      margin: 0 0 12px 0;
+      font-weight: 600;
+    }
+    button {
+      font: inherit;
+      color: var(--text);
+      background: var(--panel-2);
+      border: 1px solid transparent;
+      border-radius: 10px;
+      padding: 14px 16px;
+      min-height: 52px;
+      cursor: pointer;
+      flex: 1;
+      transition: background 0.15s, border-color 0.15s, transform 0.05s;
+      -webkit-tap-highlight-color: transparent;
+    }
+    button:active { transform: scale(0.98); }
+    button.active {
+      background: var(--accent-dim);
+      border-color: var(--accent);
+      color: var(--accent);
+    }
+    button.primary {
+      background: var(--accent);
+      color: #0B1620;
+      font-weight: 600;
+    }
+    button.ghost {
+      background: transparent;
+      border: 1px solid var(--panel-2);
+    }
+    .row {
+      display: flex;
+      gap: 10px;
+    }
+    .row + .row { margin-top: 10px; }
+    .toggle {
+      display: grid;
+      grid-template-columns: 1fr 1fr;
+      gap: 10px;
+    }
+    .grid-3 {
+      display: grid;
+      grid-template-columns: repeat(3, 1fr);
+      gap: 10px;
+    }
+    input[type="text"], input[type="number"] {
+      font: inherit;
+      color: var(--text);
+      background: var(--panel-2);
+      border: 1px solid transparent;
+      border-radius: 10px;
+      padding: 14px 14px;
+      width: 100%;
+      min-height: 52px;
+    }
+    input:focus {
+      outline: none;
+      border-color: var(--accent);
+    }
+    label {
+      display: block;
+      font-size: 12px;
+      color: var(--muted);
+      text-transform: uppercase;
+      letter-spacing: 0.08em;
+      margin: 0 0 6px 2px;
+    }
+    .form-row {
+      display: grid;
+      grid-template-columns: 1fr 1fr;
+      gap: 10px;
+      margin-bottom: 10px;
+    }
+    .form-row .full { grid-column: 1 / -1; }
+    .ack {
+      position: fixed;
+      bottom: max(env(safe-area-inset-bottom), 20px);
+      left: 50%;
+      transform: translateX(-50%) translateY(20px);
+      background: var(--panel-2);
+      color: var(--text);
+      padding: 10px 16px;
+      border-radius: 999px;
+      font-size: 14px;
+      opacity: 0;
+      transition: opacity 0.2s, transform 0.2s;
+      pointer-events: none;
+      box-shadow: 0 4px 18px rgba(0,0,0,0.4);
+    }
+    .ack.show {
+      opacity: 1;
+      transform: translateX(-50%) translateY(0);
+    }
+  </style>
+</head>
+<body>
+  <h1>Vehicle nav control</h1>
+  <div class="status">
+    <div class="dot" id="dot"></div>
+    <span id="status-text">connecting…</span>
+  </div>
+
+  <section>
+    <h2>Map interaction</h2>
+    <div class="toggle">
+      <button id="int-off" class="active">Locked</button>
+      <button id="int-on">Pan + zoom</button>
+    </div>
+  </section>
+
+  <section>
+    <h2>View</h2>
+    <div class="row">
+      <button id="recenter" class="primary">Recenter on vehicle</button>
+    </div>
+    <div class="row" style="margin-top: 10px;">
+      <div class="grid-3" style="flex: 1;">
+        <button data-zoom="11">Wide</button>
+        <button data-zoom="13" class="active">Normal</button>
+        <button data-zoom="16">Close</button>
+      </div>
+    </div>
+  </section>
+
+  <section>
+    <h2>Destination</h2>
+    <div class="form-row">
+      <div>
+        <label for="dest-lat">Latitude</label>
+        <input id="dest-lat" type="number" step="any" inputmode="decimal" placeholder="25.7907" />
+      </div>
+      <div>
+        <label for="dest-lon">Longitude</label>
+        <input id="dest-lon" type="number" step="any" inputmode="decimal" placeholder="-80.1300" />
+      </div>
+      <div class="full">
+        <label for="dest-label">Label</label>
+        <input id="dest-label" type="text" placeholder="Destination" />
+      </div>
+    </div>
+    <div class="row">
+      <button id="dest-set" class="primary">Set destination</button>
+      <button id="dest-clear" class="ghost">Clear</button>
+    </div>
+  </section>
+
+  <div id="ack" class="ack"></div>
+
+  <script>
+    (function () {
+      // Connect to the same host that served this page; the bridge runs both
+      // HTTP and WS on one port. wss:// if the page came over https, else ws://.
+      const proto = location.protocol === 'https:' ? 'wss:' : 'ws:';
+      const url = `${proto}//${location.host}/control`;
+
+      const dot = document.getElementById('dot');
+      const statusText = document.getElementById('status-text');
+      const ackEl = document.getElementById('ack');
+      let ackTimer = null;
+      function ack(text) {
+        ackEl.textContent = text;
+        ackEl.classList.add('show');
+        if (ackTimer) clearTimeout(ackTimer);
+        ackTimer = setTimeout(() => ackEl.classList.remove('show'), 1200);
+      }
+
+      // ---- UI references ----
+      const intOff = document.getElementById('int-off');
+      const intOn = document.getElementById('int-on');
+      const recenterBtn = document.getElementById('recenter');
+      const zoomBtns = Array.from(document.querySelectorAll('[data-zoom]'));
+      const destLat = document.getElementById('dest-lat');
+      const destLon = document.getElementById('dest-lon');
+      const destLabel = document.getElementById('dest-label');
+      const destSet = document.getElementById('dest-set');
+      const destClear = document.getElementById('dest-clear');
+
+      // ---- WebSocket with reconnect ----
+      let ws = null;
+      let backoff = 500;
+      const MAX_BACKOFF = 10000;
+      let reconnectTimer = null;
+
+      function setStatus(text, connected) {
+        statusText.textContent = text;
+        dot.classList.toggle('open', !!connected);
+      }
+
+      function send(obj) {
+        if (!ws || ws.readyState !== WebSocket.OPEN) {
+          ack('not connected');
+          return false;
+        }
+        try {
+          ws.send(JSON.stringify(obj));
+          return true;
+        } catch (err) {
+          console.error('send failed', err);
+          return false;
+        }
+      }
+
+      function connect() {
+        setStatus('connecting…', false);
+        try {
+          ws = new WebSocket(url);
+        } catch (err) {
+          scheduleReconnect();
+          return;
+        }
+        ws.addEventListener('open', () => {
+          backoff = 500;
+          setStatus(`connected · ${location.host}`, true);
+        });
+        ws.addEventListener('message', (ev) => {
+          let msg;
+          try { msg = JSON.parse(ev.data); } catch { return; }
+          if (!msg || typeof msg !== 'object') return;
+          if (msg.type === 'state' && msg.state) applyState(msg.state);
+          else if (msg.type === 'recenter') ack('recentered');
+        });
+        ws.addEventListener('close', () => {
+          setStatus('disconnected', false);
+          ws = null;
+          scheduleReconnect();
+        });
+        ws.addEventListener('error', () => {
+          // close will follow; reconnect happens there
+        });
+      }
+
+      function scheduleReconnect() {
+        if (reconnectTimer !== null) return;
+        const delay = backoff;
+        backoff = Math.min(backoff * 2, MAX_BACKOFF);
+        reconnectTimer = setTimeout(() => {
+          reconnectTimer = null;
+          connect();
+        }, delay);
+      }
+
+      // ---- Apply incoming state to UI ----
+      function applyState(s) {
+        if (typeof s.interactive === 'boolean') {
+          intOn.classList.toggle('active', s.interactive);
+          intOff.classList.toggle('active', !s.interactive);
+        }
+        if (typeof s.zoom === 'number') {
+          zoomBtns.forEach((b) => b.classList.toggle('active', Number(b.dataset.zoom) === s.zoom));
+        }
+        if (s.destination && typeof s.destination === 'object') {
+          if (document.activeElement !== destLat) destLat.value = s.destination.lat ?? '';
+          if (document.activeElement !== destLon) destLon.value = s.destination.lon ?? '';
+          if (document.activeElement !== destLabel) destLabel.value = s.destination.label ?? '';
+        } else if (s.destination === null) {
+          // Don't clobber what the user is mid-typing; leave inputs alone.
+        }
+      }
+
+      // ---- Wire buttons ----
+      intOff.addEventListener('click', () => {
+        if (send({ type: 'set', key: 'interactive', value: false })) ack('map locked');
+      });
+      intOn.addEventListener('click', () => {
+        if (send({ type: 'set', key: 'interactive', value: true })) ack('pan + zoom on');
+      });
+
+      recenterBtn.addEventListener('click', () => {
+        if (send({ type: 'recenter' })) ack('recenter');
+      });
+
+      zoomBtns.forEach((btn) => {
+        btn.addEventListener('click', () => {
+          const z = Number(btn.dataset.zoom);
+          if (!Number.isFinite(z)) return;
+          if (send({ type: 'set', key: 'zoom', value: z })) ack(`zoom ${z}`);
+        });
+      });
+
+      destSet.addEventListener('click', () => {
+        const lat = Number(destLat.value);
+        const lon = Number(destLon.value);
+        if (!Number.isFinite(lat) || !Number.isFinite(lon)) {
+          ack('enter lat + lon');
+          return;
+        }
+        if (lat < -90 || lat > 90 || lon < -180 || lon > 180) {
+          ack('out of range');
+          return;
+        }
+        const label = (destLabel.value || 'Destination').trim();
+        if (send({ type: 'set', key: 'destination', value: { lat, lon, label } })) ack('destination set');
+      });
+
+      destClear.addEventListener('click', () => {
+        if (send({ type: 'set', key: 'destination', value: null })) {
+          destLat.value = '';
+          destLon.value = '';
+          destLabel.value = '';
+          ack('destination cleared');
+        }
+      });
+
+      connect();
+    })();
+  </script>
+</body>
+</html>
