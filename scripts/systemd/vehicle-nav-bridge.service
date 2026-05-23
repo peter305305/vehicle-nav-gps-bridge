@@ -1,0 +1,32 @@
+[Unit]
+Description=Vehicle nav GPS bridge (NMEA -> WebSocket + control + display)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=%i
+Group=%i
+WorkingDirectory=/home/%i/vehicle-nav-gps-bridge/gps-bridge
+EnvironmentFile=-/etc/default/vehicle-nav-bridge
+ExecStart=/usr/bin/node bridge.js
+Restart=on-failure
+RestartSec=3
+StandardOutput=journal
+StandardError=journal
+# Block journal floods if the GPS gets chatty.
+LogRateLimitIntervalSec=10s
+LogRateLimitBurst=5000
+
+# Lockdown — bridge only needs network, serial, and its own working dir.
+NoNewPrivileges=true
+ProtectSystem=strict
+ProtectHome=read-only
+ReadWritePaths=/home/%i/vehicle-nav-gps-bridge
+PrivateTmp=true
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectControlGroups=true
+
+[Install]
+WantedBy=multi-user.target

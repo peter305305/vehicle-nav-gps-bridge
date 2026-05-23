@@ -1,0 +1,20 @@
+# USB GPS receiver detection. Linux assigns tty numbers (ttyACMn / ttyUSBn) in
+# enumeration order, which rotates after replug or extra USB devices — so we
+# pin a stable /dev/gps symlink and grant dialout group access (0660) so the
+# unprivileged bridge user can read without being root.
+#
+# Supported receivers:
+#   - u-blox M10 / M8 / M9 (USB CDC, vendor 1546)            -> /dev/ttyACMn
+#   - GlobalSat BU-353N / BU-353S4 (Prolific PL2303 bridge)  -> /dev/ttyUSBn
+#   - Other Prolific PL2303-based receivers                  -> /dev/ttyUSBn
+#
+# If your receiver isn't matched here, run `lsusb` with it plugged in to find
+# the idVendor:idProduct pair and add another rule line below.
+
+# u-blox direct USB
+SUBSYSTEM=="tty", ATTRS{idVendor}=="1546", SYMLINK+="gps", GROUP="dialout", MODE="0660"
+
+# Prolific PL2303 USB-to-Serial (covers BU-353N and most clones)
+SUBSYSTEM=="tty", ATTRS{idVendor}=="067b", ATTRS{idProduct}=="2303", SYMLINK+="gps", GROUP="dialout", MODE="0660"
+# PL2303HX variants
+SUBSYSTEM=="tty", ATTRS{idVendor}=="067b", ATTRS{idProduct}=="23a3", SYMLINK+="gps", GROUP="dialout", MODE="0660"
