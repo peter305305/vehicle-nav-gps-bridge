@@ -123,6 +123,14 @@ const state = {
   fixQuality: null,
   timestamp: null,
   hasFix: false,
+  // Fix is reported independently by GGA (fixQuality) and RMC (status A/V). We
+  // track each source separately and OR them in deriveFix() so a valid GGA
+  // position is shown even while RMC still reports 'V' — a common state on this
+  // receiver (and others) before RMC validates its navigation solution. Letting
+  // either sentence null shared lat/lon directly is what previously made a good
+  // GGA fix flicker to "NO FIX" every cycle.
+  ggaFix: false,
+  rmcValid: false,
 };
 
 // Control-channel state. Held by the bridge so a freshly opened phone page
@@ -201,24 +209,42 @@ function knotsToMph(knots) {
   return knots * 1.15078;
 }
 
+// nmea-simple reports GGA fix quality as a NAME ('fix', 'delta', ...) rather
+// than the raw NMEA integer. Map it back to the numeric code so downstream
+// consumers (display, .gps-watch.js, maybeLog) can keep using `=== 2` (DGPS),
+// `>= 1` (any fix), etc. Index order matches the NMEA GGA fix-quality field.
+const FIX_QUALITY_BY_NAME = {
+  none: 0, fix: 1, delta: 2, pps: 3, rtk: 4, frtk: 5,
+  estimated: 6, manual: 7, simulation: 8,
+};
+
+// Recompute hasFix from the two independent fix sources. We have a fix if either
+// GGA reports fixQuality > 0 or RMC reports status 'A'. Only when BOTH agree
+// there's no fix do we null the position; otherwise stale coords are cleared by
+// the 3s dropout heartbeat, not by a single contradicting sentence.
+function deriveFix() {
+  state.hasFix = state.ggaFix || state.rmcValid;
+  if (!state.hasFix) {
+    state.lat = null;
+    state.lon = null;
+  }
+}
+
 function handleParsed(packet) {
   // nmea-simple emits objects with a `sentenceId` like 'RMC', 'GGA', etc.
   // We only care about RMC and GGA for position/speed/heading/fix info.
   switch (packet.sentenceId) {
     case 'RMC': {
-      // status === 'A' means active/valid fix; 'V' is void.
-      const valid = packet.status === 'A';
-      if (valid) {
-        state.lat = packet.latitude;
-        state.lon = packet.longitude;
-        state.hasFix = true;
-      } else {
-        // No fix — null out coords but keep other known fields so the UI can
-        // still show last-known sats / heading context if it wants to.
-        state.lat = null;
-        state.lon = null;
-        state.hasFix = false;
+      // nmea-simple reports RMC status as 'valid' (raw 'A') or 'warning' (raw
+      // 'V') — NOT the raw letter. Accept both spellings for safety. Record
+      // validity but don't clobber a position GGA may have provided; deriveFix()
+      // decides the merged result.
+      state.rmcValid = packet.status === 'valid' || packet.status === 'A';
+      if (state.rmcValid) {
+        if (typeof packet.latitude === 'number') state.lat = packet.latitude;
+        if (typeof packet.longitude === 'number') state.lon = packet.longitude;
       }
+      // Speed/heading/time always update when present, fix or not.
       if (typeof packet.speedKnots === 'number') {
         state.speedKnots = packet.speedKnots;
         state.speedMph = knotsToMph(packet.speedKnots);
@@ -231,25 +257,26 @@ function handleParsed(packet) {
       } else {
         state.timestamp = new Date().toISOString();
       }
+      deriveFix();
       break;
     }
 
     case 'GGA': {
-      // fixQuality: 0 = invalid, 1 = GPS fix, 2 = DGPS, etc.
-      state.fixQuality = packet.fixType !== undefined ? packet.fixType
-                       : (typeof packet.fixQuality === 'number' ? packet.fixQuality : null);
+      // fixQuality: 0 = invalid, 1 = GPS fix, 2 = DGPS, etc. nmea-simple gives a
+      // name in `fixType`; normalize to the number. Fall back to a numeric
+      // `fixQuality` if a future parser version provides one.
+      let q = packet.fixType !== undefined ? packet.fixType : packet.fixQuality;
+      if (typeof q === 'string') q = FIX_QUALITY_BY_NAME[q] ?? null;
+      state.fixQuality = typeof q === 'number' ? q : null;
       if (typeof packet.satellitesInView === 'number') {
         state.satellites = packet.satellitesInView;
       }
-      if (state.fixQuality && state.fixQuality > 0) {
+      state.ggaFix = state.fixQuality !== null && state.fixQuality > 0;
+      if (state.ggaFix) {
         if (typeof packet.latitude === 'number') state.lat = packet.latitude;
         if (typeof packet.longitude === 'number') state.lon = packet.longitude;
-        state.hasFix = true;
-      } else {
-        state.lat = null;
-        state.lon = null;
-        state.hasFix = false;
       }
+      deriveFix();
       // GGA timestamps are time-of-day only; prefer wall clock if we don't
       // already have a full RMC timestamp.
       if (!state.timestamp) {
@@ -685,6 +712,8 @@ async function main() {
     if (lastSentenceAt === 0) return; // never received anything yet — let it run
     if (Date.now() - lastSentenceAt < 3000) return;
 
+    state.ggaFix = false;
+    state.rmcValid = false;
     state.hasFix = false;
     state.lat = null;
     state.lon = null;
@@ -741,10 +770,17 @@ function shutdown(signal) {
   setTimeout(() => process.exit(0), 2000).unref();
 }
 
-process.on('SIGINT', () => shutdown('SIGINT'));
-process.on('SIGTERM', () => shutdown('SIGTERM'));
+// Only wire up signals and start the serial/HTTP stack when run directly. When
+// required as a module (e.g. by tests) we expose the pure sentence-merge
+// internals so fix logic can be exercised without opening the serial port.
+if (require.main === module) {
+  process.on('SIGINT', () => shutdown('SIGINT'));
+  process.on('SIGTERM', () => shutdown('SIGTERM'));
 
-main().catch((err) => {
-  console.error('[bridge] fatal:', err);
-  process.exit(1);
-});
+  main().catch((err) => {
+    console.error('[bridge] fatal:', err);
+    process.exit(1);
+  });
+}
+
+module.exports = { handleParsed, deriveFix, state };
