@@ -1,0 +1,31 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!--
+  LaunchAgent for the fullscreen display. install-mac.sh substitutes __REPO__
+  and drops the result in ~/Library/LaunchAgents/. Needs a logged-in GUI
+  session (enable automatic login for the kiosk user). KeepAlive relaunches
+  Chrome if it is quit; use `scripts/macos/ctl.sh stop kiosk` to get the
+  desktop back while working on the machine.
+-->
+<plist version="1.0">
+<dict>
+  <key>Label</key>
+  <string>com.vehicle-nav.kiosk</string>
+
+  <key>ProgramArguments</key>
+  <array>
+    <string>/bin/bash</string>
+    <string>__REPO__/scripts/macos/start-kiosk.sh</string>
+  </array>
+
+  <key>RunAtLoad</key>
+  <true/>
+  <key>KeepAlive</key>
+  <true/>
+  <key>ThrottleInterval</key>
+  <integer>5</integer>
+
+  <key>LimitLoadToSessionType</key>
+  <string>Aqua</string>
+</dict>
+</plist>

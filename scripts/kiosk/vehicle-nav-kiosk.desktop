@@ -1,9 +1,0 @@
-[Desktop Entry]
-Type=Application
-Name=Vehicle Nav Kiosk
-Comment=Fullscreen Chromium pointed at the local bridge display
-Exec=/home/beastpi/vehicle-nav-gps-bridge/scripts/kiosk/start-kiosk.sh
-Terminal=false
-NoDisplay=true
-X-GNOME-Autostart-enabled=true
-X-GNOME-Autostart-Delay=2

@@ -1,17 +1,45 @@
 #!/usr/bin/env node
-// GPS receiver probe. Tries a sequence of baud rates against /dev/gps and
-// prints, for each, how many bytes arrived and what they look like. Drop in
-// /home/beastpi/vehicle-nav-gps-bridge/gps-bridge so it can pick up serialport
-// from the already-installed node_modules.
+// GPS receiver probe. Tries a sequence of baud rates against a serial device
+// and prints, for each, how many bytes arrived and what they look like. Use it
+// to find the right GPS_BAUD_RATE for a new receiver.
+//
+//   node probe.js                        # auto-detect the USB receiver
+//   node probe.js /dev/cu.usbmodem14101  # explicit device
+//
+// Run from gps-bridge/ so it picks up serialport from node_modules.
 
 'use strict';
+const fs = require('fs');
 const { SerialPort } = require('serialport');
 
-const PATH = process.argv[2] || '/dev/gps';
 const BAUDS = [4800, 9600, 19200, 38400, 57600, 115200];
 const PER_BAUD_MS = 3000;
 
+// Same discovery heuristics as bridge.js: known GPS vendor IDs first, then
+// USB-serial path patterns. On macOS prefer the /dev/cu.* call-out node.
+const GPS_VENDOR_IDS = new Set(['1546', '067b']);
+const PATH_PATTERNS = [/^\/dev\/tty\.usbmodem/i, /^\/dev\/tty\.usbserial/i, /^\/dev\/ttyACM\d+$/i, /^\/dev\/ttyUSB\d+$/i, /^COM\d+$/i];
+
+async function detect() {
+  const ports = await SerialPort.list();
+  const hit = ports.find((p) => p.vendorId && GPS_VENDOR_IDS.has(p.vendorId.toLowerCase()))
+    || ports.find((p) => PATH_PATTERNS.some((re) => re.test(p.path)));
+  if (!hit) return null;
+  let p = hit.path;
+  if (process.platform === 'darwin' && p.startsWith('/dev/tty.')) {
+    const cu = '/dev/cu.' + p.slice('/dev/tty.'.length);
+    if (fs.existsSync(cu)) p = cu;
+  }
+  return p;
+}
+
 (async () => {
+  const PATH = process.argv[2] || await detect();
+  if (!PATH) {
+    console.error('No USB GPS receiver found. Pass the device path explicitly, e.g. node probe.js /dev/cu.usbmodem14101');
+    process.exit(1);
+  }
+  console.log(`probing ${PATH}`);
   for (const baud of BAUDS) {
     process.stdout.write(`=== ${baud} baud ===\n`);
     let port;

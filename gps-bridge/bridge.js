@@ -3,9 +3,13 @@
  * ---------------------------------------------------------------------------
  * GPS bridge service for a vehicle navigation display.
  *
- * Reads NMEA-0183 sentences from a u-blox M10 USB GPS receiver over a serial
- * port, parses them, merges RMC + GGA state, and broadcasts a unified JSON
- * position object to all connected WebSocket clients.
+ * Reads NMEA-0183 sentences from a USB GPS receiver (u-blox M10, GlobalSat
+ * BU-353N, ...) over a serial port, parses them, merges RMC + GGA state, and
+ * broadcasts a unified JSON position object to all connected WebSocket clients.
+ *
+ * Runs on macOS (Mac Mini in-car install, see scripts/macos/), Linux, or
+ * Windows. The receiver is discovered automatically and re-attached whenever
+ * it appears (hot-plug, sleep/wake), so the service is safe to run unattended.
  *
  * Also serves a phone-friendly control page (HTTP GET /) and a second
  * WebSocket channel (/control) used to drive the display at runtime:
@@ -20,7 +24,7 @@
  * Environment variables (all optional):
  *   GPS_SERIAL_PORT  Explicit serial device path. If set, auto-detection is
  *                    skipped. Examples:
- *                      macOS:   /dev/tty.usbmodem14101
+ *                      macOS:   /dev/cu.usbmodem14101
  *                      Linux:   /dev/ttyACM0
  *                      Windows: COM5
  *   GPS_BAUD_RATE    Serial baud rate. Default 9600 (u-blox M10 factory).
@@ -61,16 +65,23 @@ const WS_PORT = parseInt(process.env.WS_PORT, 10) || 8080;
 const MAPBOX_TOKEN = process.env.MAPBOX_TOKEN || '';
 
 // Where the built display app lives. Default to the sibling display/dist
-// directory in this monorepo; on a Pi deploy this is what `npm run build`
+// directory in this monorepo; on a deployed machine this is what `npm run build`
 // produces. Setting DISPLAY_DIST_DIR= (empty) disables /app/* serving.
 const DEFAULT_DIST_DIR = path.resolve(__dirname, '..', 'display', 'dist');
 const DISPLAY_DIST_DIR = process.env.DISPLAY_DIST_DIR === undefined
   ? DEFAULT_DIST_DIR
   : (process.env.DISPLAY_DIST_DIR || null);
 
-// u-blox USB vendor ID. SerialPort returns vendorId as a lowercase hex string
-// without the 0x prefix, so we compare against the string form.
-const UBLOX_VENDOR_ID = '1546';
+// USB vendor IDs we recognise as GPS receivers. SerialPort returns vendorId as
+// a lowercase hex string without the 0x prefix, so we compare string forms.
+//   1546  u-blox (M8/M9/M10 direct USB CDC)
+//   067b  Prolific PL2303 (GlobalSat BU-353N / S4 and most clones)
+const GPS_VENDOR_IDS = new Set(['1546', '067b']);
+
+// How long to wait between attempts to find/open the receiver when none is
+// present. A Mac Mini in a car sleeps and wakes, and USB re-enumerates on
+// wake, so the bridge must keep looking rather than give up at startup.
+const SERIAL_RETRY_MS = 5000;
 
 // Path patterns that typically correspond to USB serial / USB CDC devices on
 // each major platform. Used only when vendorId isn't reported by the OS.
@@ -179,13 +190,13 @@ async function findGpsPort() {
 
   const ports = await SerialPort.list();
 
-  // First pass: match by u-blox vendor ID (most reliable).
+  // First pass: match by known GPS vendor ID (most reliable).
   const byVendor = ports.find(
-    (p) => p.vendorId && p.vendorId.toLowerCase() === UBLOX_VENDOR_ID
+    (p) => p.vendorId && GPS_VENDOR_IDS.has(p.vendorId.toLowerCase())
   );
   if (byVendor) {
-    console.log(`[bridge] u-blox device detected by vendorId at ${byVendor.path}`);
-    return byVendor.path;
+    console.log(`[bridge] GPS receiver detected by vendorId ${byVendor.vendorId} at ${byVendor.path}`);
+    return preferCallout(byVendor.path);
   }
 
   // Second pass: fall back to path heuristics. Some OS/driver combos don't
@@ -195,10 +206,20 @@ async function findGpsPort() {
   );
   if (byPath) {
     console.log(`[bridge] GPS candidate detected by path pattern at ${byPath.path}`);
-    return byPath.path;
+    return preferCallout(byPath.path);
   }
 
   return null;
+}
+
+// macOS exposes every serial device twice: /dev/tty.* (dial-in, blocks on
+// open until carrier-detect) and /dev/cu.* (call-out, opens immediately).
+// SerialPort.list() reports the tty.* name; for a USB GPS we want cu.*.
+function preferCallout(portPath) {
+  if (process.platform !== 'darwin') return portPath;
+  if (!portPath.startsWith('/dev/tty.')) return portPath;
+  const cu = '/dev/cu.' + portPath.slice('/dev/tty.'.length);
+  return fs.existsSync(cu) ? cu : portPath;
 }
 
 // ---------------------------------------------------------------------------
@@ -635,43 +656,74 @@ function lanAddresses() {
 // Main startup
 // ---------------------------------------------------------------------------
 
-async function main() {
-  // Start the server first so the control page is reachable even before GPS
-  // hardware is ready — useful when bringing the Pi up before the receiver.
-  startServer();
+let serialRetryTimer = null;
+let warnedNoPort = false;
+
+function scheduleSerialRetry() {
+  if (shuttingDown || serialRetryTimer !== null) return;
+  serialRetryTimer = setTimeout(() => {
+    serialRetryTimer = null;
+    connectSerial().catch((err) => {
+      console.error('[bridge] serial connect failed:', err.message);
+      scheduleSerialRetry();
+    });
+  }, SERIAL_RETRY_MS);
+}
+
+// Drop all fix state and tell clients. Used when the serial link closes
+// (unplug, sleep/wake re-enumeration) so the display flips to GPS SIGNAL LOST
+// immediately instead of waiting out the dropout heartbeat.
+function markGpsLost() {
+  state.ggaFix = false;
+  state.rmcValid = false;
+  state.hasFix = false;
+  state.lat = null;
+  state.lon = null;
+  state.timestamp = new Date().toISOString();
+  broadcastGps();
+}
+
+// Find and open the receiver. Never throws on "not there yet" — it schedules
+// a retry instead, so the HTTP/WS side keeps running unattended and the GPS
+// attaches whenever it shows up. Re-entered from the 'close' handler so an
+// unplug/replug (or a Mac waking from sleep) recovers without a restart.
+async function connectSerial() {
+  if (shuttingDown || serialPort) return;
 
   const portPath = await findGpsPort();
   if (!portPath) {
-    // Keep the control server alive even without a GPS — lets the phone
-    // control page work, and lets the user plug the receiver in later. The
-    // dropout heartbeat below will keep emitting "no fix" so the display still
-    // shows GPS SIGNAL LOST rather than freezing.
-    console.warn('[bridge] No GPS serial port found. Set GPS_SERIAL_PORT to override auto-detection. Continuing without GPS.');
+    if (!warnedNoPort) {
+      console.warn(`[bridge] No GPS serial port found. Set GPS_SERIAL_PORT to override auto-detection. Retrying every ${SERIAL_RETRY_MS / 1000}s.`);
+      warnedNoPort = true;
+    }
+    scheduleSerialRetry();
     return;
   }
+  warnedNoPort = false;
 
   console.log(`[bridge] Opening ${portPath} @ ${GPS_BAUD_RATE} baud`);
 
-  serialPort = new SerialPort({ path: portPath, baudRate: GPS_BAUD_RATE }, (err) => {
+  const port = new SerialPort({ path: portPath, baudRate: GPS_BAUD_RATE }, (err) => {
     if (err) {
-      // Same reasoning as the no-port case — keep the bridge up so the control
-      // channel and dropout heartbeat continue.
-      console.warn(`[bridge] Failed to open serial port ${portPath}: ${err.message}. Continuing without GPS.`);
-      serialPort = null;
+      // Keep the bridge up so the control channel continues; try again later.
+      console.warn(`[bridge] Failed to open serial port ${portPath}: ${err.message}. Retrying in ${SERIAL_RETRY_MS / 1000}s.`);
+      if (serialPort === port) serialPort = null;
+      scheduleSerialRetry();
     }
   });
+  serialPort = port;
 
-  serialPort.on('error', (err) => {
+  port.on('error', (err) => {
     console.error('[bridge] Serial port error:', err.message);
   });
 
-  serialPort.on('open', () => {
+  port.on('open', () => {
     console.log(`[bridge] Serial open. Configuring nav rate to 10 Hz...`);
     // Best-effort UBX CFG-RATE. If the device is already configured (saved to
     // flash/BBR) or doesn't accept the command, we just continue and rely on
     // whatever rate it's already running at.
     try {
-      serialPort.write(UBX_CFG_RATE_10HZ, (err) => {
+      port.write(UBX_CFG_RATE_10HZ, (err) => {
         if (err) {
           console.warn('[bridge] UBX CFG-RATE write failed:', err.message);
         }
@@ -681,8 +733,16 @@ async function main() {
     }
   });
 
+  port.on('close', () => {
+    if (shuttingDown) return;
+    console.warn(`[bridge] Serial port ${portPath} closed (unplugged or system slept). Reconnecting...`);
+    if (serialPort === port) serialPort = null;
+    markGpsLost();
+    scheduleSerialRetry();
+  });
+
   // NMEA is line-oriented (\r\n terminated). Split into lines, then parse.
-  const parser = serialPort.pipe(new ReadlineParser({ delimiter: '\r\n' }));
+  const parser = port.pipe(new ReadlineParser({ delimiter: '\r\n' }));
 
   parser.on('data', (line) => {
     if (!line || !line.startsWith('$')) return; // skip UBX echoes and noise
@@ -704,6 +764,12 @@ async function main() {
       maybeLog();
     }
   });
+}
+
+async function main() {
+  // Start the server first so the control page is reachable even before GPS
+  // hardware is ready — useful when bringing the machine up before the receiver.
+  startServer();
 
   // ---- Dropout heartbeat ----
   // If the serial link goes silent for 3s, emit a no-fix heartbeat so clients
@@ -711,16 +777,17 @@ async function main() {
   setInterval(() => {
     if (lastSentenceAt === 0) return; // never received anything yet — let it run
     if (Date.now() - lastSentenceAt < 3000) return;
-
-    state.ggaFix = false;
-    state.rmcValid = false;
-    state.hasFix = false;
-    state.lat = null;
-    state.lon = null;
-    state.timestamp = new Date().toISOString();
-    broadcastGps();
+    if (!state.hasFix && state.lat === null) {
+      // Already reported lost; just keep the heartbeat ticking.
+      state.timestamp = new Date().toISOString();
+      broadcastGps();
+      return;
+    }
+    markGpsLost();
     maybeLog();
   }, 1000);
+
+  await connectSerial();
 }
 
 // ---------------------------------------------------------------------------

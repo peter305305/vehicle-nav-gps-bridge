@@ -1,0 +1,36 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!--
+  LaunchAgent for the GPS bridge. install-mac.sh substitutes __REPO__ and
+  __HOME__ and drops the result in ~/Library/LaunchAgents/. Runs in the user's
+  GUI session (so it shares the login with the kiosk) and is restarted by
+  launchd if node ever exits.
+-->
+<plist version="1.0">
+<dict>
+  <key>Label</key>
+  <string>com.vehicle-nav.bridge</string>
+
+  <key>ProgramArguments</key>
+  <array>
+    <string>/bin/bash</string>
+    <string>__REPO__/scripts/macos/run-bridge.sh</string>
+  </array>
+
+  <key>RunAtLoad</key>
+  <true/>
+  <key>KeepAlive</key>
+  <true/>
+  <!-- Don't hot-loop if node crashes on startup. -->
+  <key>ThrottleInterval</key>
+  <integer>3</integer>
+
+  <key>StandardOutPath</key>
+  <string>__HOME__/Library/Logs/vehicle-nav/bridge.log</string>
+  <key>StandardErrorPath</key>
+  <string>__HOME__/Library/Logs/vehicle-nav/bridge.log</string>
+
+  <key>LimitLoadToSessionType</key>
+  <string>Aqua</string>
+</dict>
+</plist>
