@@ -85,111 +85,29 @@ The display will auto-reconnect once the bridge is up. See `gps-bridge/README.md
 
 If you don't have a GPS receiver plugged in, the display still loads — it will just show "GPS SIGNAL LOST" and the destination pin/connector won't have a vehicle to anchor to.
 
-## Kiosk autostart on Raspberry Pi OS
+## Kiosk autostart on the Mac Mini
 
-Target: Raspberry Pi 5 running Raspberry Pi OS (Bookworm), Wayland-based labwc or X11 LXDE. Goal: on boot, the Pi comes up directly into Chromium displaying the app fullscreen, no cursor, no panels, no scrollbars.
+Handled by `scripts/macos/install-mac.sh` at the repo root. It builds this app, and the bridge then serves the result at `http://localhost:8080/app/`. A LaunchAgent (`com.vehicle-nav.kiosk`) runs `scripts/macos/start-kiosk.sh`, which waits for the bridge's `/healthz`, then launches Google Chrome with `--kiosk --app=<url>` under `caffeinate` so the display never sleeps. If Chrome quits, launchd relaunches it.
 
-### Step 1: Build the app on the Pi (or copy the built `dist/`)
+Requirements that the installer can't set for you: automatic login for the kiosk user (System Settings → Users & Groups; needs FileVault off), so the GUI session exists after a cold boot.
 
-```
-cd ~/vehicle-nav-gps-bridge/display
-npm install
-npm run build
-```
+Useful commands on the Mini:
 
-### Step 2: Serve it locally
-
-A few options:
-
-- `npm run preview` (simplest, but ties the kiosk to Node)
-- A tiny static server:
-  ```
-  npx serve -s dist -l 4173
-  ```
-- Or symlink `dist/` into nginx/caddy if you already have one running.
-
-### Step 3: Disable screen blanking
-
-For Wayland/labwc (Bookworm default on Pi 5):
-
-```
-sudo apt install wlr-randr
-# in ~/.config/labwc/autostart, add:
-swayidle timeout 300 'wlr-randr --output HDMI-A-1 --off' resume 'wlr-randr --output HDMI-A-1 --on' &
-# OR just disable it entirely:
-xset s off s noblank -dpms     # X11 fallback
+```bash
+scripts/macos/ctl.sh stop kiosk      # quit Chrome and keep it quit until start/next login
+scripts/macos/ctl.sh start kiosk
+scripts/macos/ctl.sh logs kiosk      # ~/Library/Logs/vehicle-nav/kiosk.log
 ```
 
-Simpler: in `raspi-config` → Display Options → disable screen blanking.
+Chrome runs with its own profile in `~/Library/Application Support/vehicle-nav-kiosk`, so a desktop Chrome on the same account is unaffected.
 
-### Step 4: Hide the cursor at the OS level
+Rebuild after changing the display:
 
-CSS already hides it inside the page, but the cursor is briefly visible during load:
-
-```
-sudo apt install unclutter-xfixes
+```bash
+cd display && npm run build
 ```
 
-### Step 5: Autostart Chromium in kiosk mode
-
-On Bookworm with labwc/Wayland — edit (or create) `~/.config/labwc/autostart`:
-
-```
-chromium-browser \
-  --kiosk \
-  --noerrdialogs \
-  --disable-infobars \
-  --disable-translate \
-  --disable-features=TranslateUI \
-  --disable-session-crashed-bubble \
-  --check-for-update-interval=31536000 \
-  --autoplay-policy=no-user-gesture-required \
-  --start-fullscreen \
-  --window-position=0,0 \
-  --app=http://localhost:4173 &
-unclutter-xfixes --timeout 0 &
-```
-
-On X11/LXDE (older Raspberry Pi OS) — edit `/etc/xdg/lxsession/LXDE-pi/autostart`:
-
-```
-@xset s off
-@xset -dpms
-@xset s noblank
-@chromium-browser --kiosk --noerrdialogs --disable-infobars --app=http://localhost:4173
-@unclutter -idle 0
-```
-
-### Step 6: Make the static server start on boot
-
-Easiest is a `systemd` user unit. Create `~/.config/systemd/user/vehicle-display.service`:
-
-```
-[Unit]
-Description=Vehicle Display static server
-After=network.target
-
-[Service]
-WorkingDirectory=/home/pi/vehicle-nav-gps-bridge/display
-ExecStart=/usr/bin/npx serve -s dist -l 4173
-Restart=always
-
-[Install]
-WantedBy=default.target
-```
-
-Enable it:
-
-```
-systemctl --user enable --now vehicle-display.service
-loginctl enable-linger pi   # so the user service starts before login
-```
-
-You'll want a matching `systemd` unit for `gps-bridge` — see `gps-bridge/README.md` for that (or just adapt the same pattern, pointing `WorkingDirectory` at `../gps-bridge` and `ExecStart` at `/usr/bin/node bridge.js`).
-
-### Step 7: Reboot
-
-The Pi should come up directly into the display.
+No restart needed — the bridge serves `dist/` with `no-cache` on `index.html`, so a reload (or `scripts/macos/ctl.sh restart kiosk`) picks it up.
 
 ## Architecture and extension points
 
@@ -222,9 +140,8 @@ Planned extension points (intentionally stubbed, not implemented yet):
 
 - Map is blank or low-res — your style URL probably needs an API key. Try the default demo tiles first.
 - ETA / distance always show `—` — `VITE_MAPBOX_TOKEN` is unset or invalid, or the device has no internet.
-- "GPS SIGNAL LOST" banner stays on — the bridge isn't running, or `VITE_GPS_WS_URL` doesn't match. From the Pi, `wscat -c ws://localhost:8080` to confirm the bridge is reachable.
-- Cursor visible briefly on boot — install `unclutter-xfixes` and start it from your autostart file.
-- App appears windowed, not fullscreen — ensure Chromium was launched with `--kiosk` and that no window manager is overriding it.
+- "GPS SIGNAL LOST" banner stays on — the bridge isn't running or has no receiver. `curl http://localhost:8080/healthz` should answer; `scripts/macos/ctl.sh logs bridge` shows whether a serial device was found.
+- App appears windowed, not fullscreen — Chrome wasn't launched with `--kiosk`. Check `~/Library/Logs/vehicle-nav/kiosk.log` for which browser the launcher picked.
 
 ## License
 
