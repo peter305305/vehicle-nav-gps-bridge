@@ -32,6 +32,8 @@ Forked from [peter305305/vehicle-nav-gps-bridge](https://github.com/peter305305/
 
 ## Setting up the Mac Mini (canonical setup)
 
+Step-by-step guide for handing to someone else, including the System Settings that can't be scripted: **[INSTALL-MAC-MINI.md](./INSTALL-MAC-MINI.md)**. Short version:
+
 Prereqs on the Mini: macOS 13 or newer, [Homebrew](https://brew.sh) installed, and a user account that will own the kiosk session. Then, sitting at the Mini:
 
 ```bash
